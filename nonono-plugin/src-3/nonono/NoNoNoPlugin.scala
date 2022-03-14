@@ -24,7 +24,7 @@ import dotty.tools.dotc.transform.{
   Staging
 }
 import dotty.tools.dotc.typer.TyperPhase
-import dotty.tools.dotc.util.ScriptSourceFile
+import dotty.tools.dotc.util.{ScriptSourceFile, SrcPos}
 import dotty.tools.repl.{
   Command,
   Newline,
@@ -50,9 +50,9 @@ object Plugin:
   )
 
 class Plugin extends StandardPlugin:
-  val name: String = "nonono"
+  override val name: String = "nonono"
   override val description: String = "Prevent calling some methods"
-  def init(options: List[String]): List[PluginPhase] =
+  override def init(options: List[String]): List[PluginPhase] =
     val noDefs: Plugin.NoDefs = collection.mutable.Set.empty
     List(new Define(noDefs), new Detect(noDefs))
 
@@ -66,53 +66,62 @@ class Define(noDefs: Plugin.NoDefs) extends PluginPhase:
   override val runsAfter = Plugin.runsAfter
   override val runsBefore = Set(Detect.name) ++ Plugin.runsBefore
 
-  override def transformApply(
-      tree: Trees.Apply[Types.Type]
-  )(using ctx: Context): Tree = {
+  override def transformApply(tree: Apply)(using ctx: Context): Tree = {
     val nonoClass = requiredClass("nonono.NoNoNo")
     val applyName = Names.termName("apply")
-    val anonName = Names.termName("$anonfun")
-
     tree match {
       case Apply(
             Apply(TypeApply(Select(nonoIns, `applyName`), List(onType)), args),
-            List(Literal(msg)) // Todo dont capture literal here
+            msgArgs
           ) if nonoIns.tpe <:< nonoClass.typeRef =>
-        args match {
-          case List(
-                Block(
-                  List(DefDef(`anonName`, List(List(ValDef(_, _, _))), _, app)),
-                  _
-                )
-              ) =>
-            val appTree =
-              app match {
-                case x: Trees.Lazy[Trees.Apply[Types.Type] @unchecked] =>
-                  Some(x.complete(using ctx))
-                case x: Trees.Apply[Types.Type @unchecked] =>
-                  Some(x)
-                case x: Trees.Select[Types.Type @unchecked] =>
-                  Some(x)
-                case _ =>
-                  None
-              }
-            appTree.fold(reportInvalidUsage(tree)) { app =>
-              println(s"GOT ${app}")
-              noDefs.addOne(Plugin.NoDef(onType, app, msg.stringValue))
-            }
-          case _ =>
-            reportInvalidUsage(tree)
-        }
+        addNoNoDefinition(tree, onType, args, msgArgs)
         Trees.genericEmptyTree
       case other =>
         other
     }
   }
 
-  def reportInvalidUsage(
-      tree: Trees.Tree[Types.Type]
-  )(using context: Context): Unit =
-    println(tree)
+  def addNoNoDefinition(
+      tree: Tree,
+      onType: Tree,
+      args: List[Tree],
+      msgArgs: List[Tree]
+  )(using
+      ctx: Context
+  ): Unit = {
+    val anonName = Names.termName("$anonfun")
+    (args, msgArgs) match {
+      case (
+            List(
+              Block(
+                List(
+                  DefDef(`anonName`, List(List(ValDef(_, _, _))), _, app)
+                ),
+                _
+              )
+            ),
+            List(Literal(msg))
+          ) =>
+        val appTree =
+          app match {
+            case x: Trees.Lazy[Trees.Apply[Types.Type] @unchecked] =>
+              Some(x.complete(using ctx))
+            case x: Trees.Apply[Types.Type @unchecked] =>
+              Some(x)
+            case x: Trees.Select[Types.Type @unchecked] =>
+              Some(x)
+            case _ =>
+              None
+          }
+        appTree.fold(reportInvalidUsage(tree.srcPos)) { app =>
+          noDefs.addOne(Plugin.NoDef(onType, app, msg.stringValue))
+        }
+      case _ =>
+        reportInvalidUsage(tree.srcPos)
+    }
+  }
+
+  def reportInvalidUsage(pos: SrcPos)(using context: Context): Unit =
     report.error(
       """
         |Invalid NoNoNo usage.
@@ -121,7 +130,7 @@ class Define(noDefs: Plugin.NoDefs) extends PluginPhase:
         |
         | Valid usage example: `NoNoNo[Option[Any]](_.get)("Please don't")`
         |""".stripMargin,
-      pos = tree.srcPos
+      pos = pos
     )
 
 object Detect:
