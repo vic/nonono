@@ -1,19 +1,21 @@
 package nonono
 
-import dotty.tools.backend.jvm.GenBCode
-import dotty.tools.dotc.ast.Trees.*
-import dotty.tools.dotc.ast.{Trees, tpd}
-import dotty.tools.dotc.core.Constants.Constant
-import dotty.tools.dotc.core.Contexts.{Context, ContextBase}
-import dotty.tools.dotc.core.Decorators.*
-import dotty.tools.dotc.core.{Names, Types}
-import dotty.tools.dotc.core.StdNames.*
-import dotty.tools.dotc.core.Symbols.*
-import dotty.tools.dotc.interfaces.SourceFile
-import dotty.tools.dotc.plugins.{PluginPhase, StandardPlugin}
-import dotty.tools.dotc.report
-import dotty.tools.dotc.sbt.ExtractDependencies
-import dotty.tools.dotc.transform.{
+import dotty.tools.dotc
+
+import dotc.ast.Trees.*
+import dotc.ast.{Trees, tpd, untpd}
+import dotc.core.Constants.Constant
+import dotc.core.Contexts.{Context, ContextBase}
+import dotc.core.Decorators.*
+import dotc.core.Phases.Phase
+import dotc.core.{Mode, Names, Phases, Types}
+import dotc.core.StdNames.*
+import dotc.core.Symbols.*
+import dotc.interfaces.SourceFile
+import dotc.plugins.{PluginPhase, StandardPlugin}
+import dotc.{CompilationUnit, report}
+import dotc.sbt.ExtractDependencies
+import dotc.transform.{
   CountOuterAccesses,
   Erasure,
   ExtensionMethods,
@@ -30,6 +32,7 @@ import dotty.tools.repl.{
   Newline,
   ParseResult,
   Parsed,
+  ReplCompilationUnit,
   SigKill,
   State,
   SyntaxErrors
@@ -49,12 +52,83 @@ object Plugin:
       msg: String
   )
 
+  class Compiler(pluginPhases: List[PluginPhase]) extends dotc.Compiler {
+    override protected def transformPhases =
+      super.transformPhases ++ List(pluginPhases)
+    override protected def backendPhases = Nil
+  }
+
 class Plugin extends StandardPlugin:
   override val name: String = "nonono"
   override val description: String = "Prevent calling some methods"
   override def init(options: List[String]): List[PluginPhase] =
     val noDefs: Plugin.NoDefs = collection.mutable.Set.empty
-    List(new Define(noDefs), new Detect(noDefs))
+    List(
+      new Config(false, noDefs, options),
+      new Define(noDefs),
+      new Detect(noDefs)
+    )
+
+object Config:
+  val name = "nonono-config"
+
+class Config(
+    var initialized: Boolean,
+    noDefs: Plugin.NoDefs,
+    options: List[String]
+) extends PluginPhase:
+  override val phaseName: String = Config.name
+  override val runsAfter = Plugin.runsAfter
+  override val runsBefore = Set(Define.name) ++ Plugin.runsBefore
+
+  println(s"NEW CONFIG ${initialized}")
+
+  override def run(using ctx: Context): Unit = {
+    if (!initialized) {
+      initialized = true
+      foo(ctx)
+    }
+    super.run(using ctx)
+  }
+
+  def foo(parentCtx: Context): Unit = {
+    val base = new ContextBase
+    val ctx = base.initialCtx.fresh
+    val x = parentCtx.settings.allSettings.map(s =>
+      s.name -> s.valueIn(parentCtx.settingsState)
+    )
+    println(s"SETTINGS ${x}")
+    ctx.setSettings(parentCtx.settingsState)
+    ctx.base.initialize()(using ctx)
+    ctx.base.usePhases(
+      ctx.base.fusePhases(
+        phasess = ctx.base.phasePlan,
+        phasesToSkip = Nil,
+        stopBeforePhases = Nil,
+        stopAfterPhases = List(Define.name),
+        YCheckAfter = Nil
+      )(using ctx),
+      fuse = false
+    )
+
+    val compiler =
+      new Plugin.Compiler(
+        List(
+          new Config(true, noDefs, options),
+          new Define(noDefs)
+        )
+      )
+    compiler
+      .newRun(using ctx)
+      .compileFromStrings(
+        scalaSources = """
+                         |import nonono.NoNoNo
+                         |val x = NoNoNo[Option[Any]](_.get)("NOP")
+                         |""".stripMargin :: Nil,
+        javaSources = Nil
+      )
+    println("FOOO")
+  }
 
 object Define:
   val name = "nonono-define"
@@ -63,7 +137,7 @@ class Define(noDefs: Plugin.NoDefs) extends PluginPhase:
   import tpd.*
 
   override val phaseName: String = Define.name
-  override val runsAfter = Plugin.runsAfter
+  override val runsAfter = Set(Config.name) ++ Plugin.runsAfter
   override val runsBefore = Set(Detect.name) ++ Plugin.runsBefore
 
   override def transformApply(tree: Apply)(using ctx: Context): Tree = {

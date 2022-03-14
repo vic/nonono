@@ -6,10 +6,10 @@ import scala.concurrent.Future
 
 object PluginTest extends TestSuite {
 
-  NoNoNo[Option[Any]](_.get)("Prefer Option.getOrElse")
+//  NoNoNo[Option[Any]](_.get)("Prefer Option.getOrElse")
   val x = Option(22).get
 
-  NoNoNo[Iterable[Number]](_.head)("Use match or headOption")
+//  NoNoNo[Iterable[Number]](_.head)("Use match or headOption")
   val y = Seq(1, 2, 3).head
 
 //  NoNoNo[Option[Any]](_.fold[String](???)(???))("bla")
