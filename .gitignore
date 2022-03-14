@@ -1,0 +1,8 @@
+.envrc
+out/
+.idea*
+.metals*
+.bloop*
+.bsp*
+cs
+mill.*
